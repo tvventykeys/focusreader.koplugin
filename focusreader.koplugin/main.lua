@@ -31,6 +31,7 @@ local FocusReader = Widget:extend{
     spotlight_mask_color = "black", -- black, white, or optional custom image.
     spotlight_image_base_color = "black", -- independent background behind image.
     step_mode = "line",
+    center_focused_paragraph = false,
     word_mode = false, -- optional native CRengine word selection
     refresh_mode = "focused", -- fixed smooth area refresh; no experimental modes
     style = "color",
@@ -72,6 +73,7 @@ function FocusReader:init()
     self._mask_image_key = nil
     local saved_step = self.settings:readSetting("step_mode")
     self.step_mode = (saved_step == "paragraph" or saved_step == "block") and saved_step or "line"
+    self.center_focused_paragraph = self.settings:readSetting("center_focused_paragraph") == true
     self.word_mode = self.settings:readSetting("word_mode") == true
     self.pdf_highlight_style = self.settings:readSetting("pdf_highlight_style") == "underline"
         and "underline" or "tint"
@@ -221,7 +223,12 @@ function FocusReader:refreshParagraphs()
                     local ok, word = pcall(doc.getWordFromPosition, doc, pos, true)
                     if ok and word and word.pos0 then
                         local key = Logic.paragraphKey(word.pos0)
-                        if key then keys[i] = key; break end
+                        if key then
+                            keys[i] = key
+                            line.xpointer = word.pos0
+                            line.paragraph_key = key
+                            break
+                        end
                     end
                 end
             end
@@ -237,6 +244,26 @@ end
 
 function FocusReader:paragraphRange()
     return Logic.paragraphRange(self.lines, self.paragraph_starts or {}, self.index)
+end
+
+function FocusReader:canCenterParagraphs()
+    return self.ui and self.ui.rolling and not self.ui.paging
+        and self.view and self.view.view_mode == "page"
+end
+
+function FocusReader:usesCenteredParagraphs()
+    return self.center_focused_paragraph and self.style == "mask"
+        and self.spotlight_layout == "window" and self:isParagraphFocus()
+        and self:canCenterParagraphs()
+end
+
+function FocusReader:getCenteredSection(viewport)
+    if not self:usesCenteredParagraphs() then return end
+    local first, last = self:paragraphRange()
+    local sections = Logic.centeredParagraphSections(self.lines, first, last, viewport or self:getViewport())
+    for number, section in ipairs(sections) do
+        if self.index <= section.last then return section, sections, number end
+    end
 end
 
 -- Freeform Focus uses only the visible viewport. It intentionally never
@@ -274,6 +301,7 @@ function FocusReader:refreshLines(reset_index)
 end
 
 function FocusReader:_refreshLinesUnsafe(reset_index)
+    local previous_line = not reset_index and self:usesCenteredParagraphs() and self.lines[self.index]
     self.lines = {}
     self.areas = {}
     if not self.supported or not self.ui.document then return end
@@ -363,8 +391,13 @@ function FocusReader:_refreshLinesUnsafe(reset_index)
     if self:isParagraphFocus() then
         self:refreshParagraphs()
         if reset_index then
-            self.index = self._page_direction == -1
-                and (self.paragraph_starts[#self.paragraph_starts] or 1) or 1
+            self.index = 1
+            if self._page_direction == -1 then
+                self.index = self:usesCenteredParagraphs() and math.max(1, #self.lines)
+                    or self.paragraph_starts[#self.paragraph_starts] or 1
+            end
+        elseif self:usesCenteredParagraphs() then
+            self.index = self:findCenteredLine(previous_line)
         else
             self.index = (select(1, Logic.paragraphRange(self.lines,
                 self.paragraph_starts, math.min(self.index, #self.lines)))) or 1
@@ -375,6 +408,28 @@ function FocusReader:_refreshLinesUnsafe(reset_index)
     else
         self.index = math.min(self.index, Logic.maxStart(sequence, active_count))
     end
+end
+
+-- Reflow can change the line count before the selected paragraph. Find the
+-- old reading anchor in the new geometry when it is still on this page.
+function FocusReader:findCenteredLine(previous_line)
+    local nearest = math.max(1, math.min(self.index, #self.lines))
+    if not previous_line or not previous_line.xpointer then return nearest end
+    local doc = self.ui.document
+    if type(doc.getScreenPositionFromXPointer) ~= "function" then return nearest end
+    local ok, y, x = pcall(doc.getScreenPositionFromXPointer, doc, previous_line.xpointer)
+    if not ok or type(y) ~= "number" or type(x) ~= "number" then return nearest end
+    local nearest_distance = math.huge
+    for index, line in ipairs(self.lines) do
+        if line.paragraph_key == previous_line.paragraph_key
+                and x >= line.area.x and x < line.area.x + line.area.w then
+            local distance = math.abs(y - (line.y + line.h / 2))
+            if distance < nearest_distance then
+                nearest, nearest_distance = index, distance
+            end
+        end
+    end
+    return nearest
 end
 
 function FocusReader:getFocusLineCount()
@@ -797,6 +852,22 @@ function FocusReader:usesOverlayHighlight()
     return self.style == "color" and (self.ui.paging or self.pdf_highlight_style == "underline")
 end
 
+function FocusReader:paintCenteredParagraph(bb, x, y)
+    local viewport = self:getViewport()
+    local section = self:getCenteredSection(viewport)
+    if not section then return false end
+    -- ReaderView has already painted the page. Take a separate copy before
+    -- shading so overlapping source/destination rows cannot corrupt it.
+    -- Copy whole rows within the source column to preserve native glyphs,
+    -- punctuation, styles, indents and text alignment.
+    local strip = Blitbuffer.new(section.w, section.h, bb:getType())
+    strip:blitFrom(bb, 0, 0, x + section.x, y + section.source_y, section.w, section.h)
+    self:shade(bb, x + viewport.x, y + viewport.y, viewport.w, viewport.h)
+    bb:blitFrom(strip, x + section.x, y + section.y, 0, 0, section.w, section.h)
+    strip:free()
+    return true
+end
+
 function FocusReader:paintTo(bb, x, y)
     if not self.supported or not self.enabled then return end
     if self.style == "freeform" then
@@ -860,6 +931,7 @@ function FocusReader:paintTo(bb, x, y)
         return
     end
     if self.style ~= "mask" then return end
+    if self:usesCenteredParagraphs() and self:paintCenteredParagraph(bb, x, y) then return end
     local slot = self:getSlot()
     if not slot then return end -- No text: do not blackout an image-only page.
     for _, area in ipairs(self.areas) do
@@ -892,6 +964,14 @@ end
 -- perform waveform transitions that aren't under plugin control.
 function FocusReader:redraw(whole_view, previous_slot, previous_native_bounds)
     if not self.view or not self.view.dialog then return end
+    if not whole_view and previous_slot and previous_slot.centered then
+        local current = self:getCenteredSection()
+        -- Only these two bands change. Repaint their union so a smaller
+        -- section clears every row that belonged to the previous one.
+        local bounds = current and Geom:new(Logic.unionRefresh(previous_slot, current)) or nil
+        UIManager:setDirty(self.view.dialog, "ui", bounds)
+        return
+    end
     local region
     if not whole_view and previous_slot then
         local new_slot = self:getSlot()
@@ -993,9 +1073,20 @@ function FocusReader:moveFocus(direction)
     local active_count = self:getFocusLineCount()
     local sequence = self.word_mode and self.style == "color" and not self.ui.paging and self.words or self.lines
     local index, page_direction
+    local previous_section
     if self:isParagraphFocus() then
-        index, page_direction = Logic.paragraphAdvance(
-            self.paragraph_starts or {}, self.index, direction)
+        local section, sections, number = self:getCenteredSection()
+        previous_section = section
+        local next_section = section and sections[number + direction]
+        if next_section then
+            index = next_section.first
+        else
+            index, page_direction = Logic.paragraphAdvance(
+                self.paragraph_starts or {}, self.index, direction)
+            if index and direction < 0 and self:usesCenteredParagraphs() then
+                index = select(2, Logic.paragraphRange(self.lines, self.paragraph_starts, index))
+            end
+        end
     else
         local step = self.step_mode == "block" and active_count or 1
         index, page_direction = Logic.advance(sequence, self.index,
@@ -1003,7 +1094,7 @@ function FocusReader:moveFocus(direction)
     end
     if page_direction then return self:turnPage(page_direction) end
     if index ~= self.index then
-        local old_slot = self:getSlot()
+        local old_slot = previous_section or self:getSlot()
         local old_native_bounds = self._native_bounds
         self.index = index
         if self.style == "color" and not self:usesOverlayHighlight() then self:applyNativeSelection() end
@@ -1134,6 +1225,16 @@ function FocusReader:setSpotlightLayout(layout)
     self.spotlight_layout = layout
     self.settings:saveSetting("spotlight_layout", layout)
     if self.enabled and self.style == "mask" then self:redraw(true) end
+end
+
+function FocusReader:setCenterFocusedParagraph(enabled)
+    local was_centered = self:usesCenteredParagraphs()
+    self.center_focused_paragraph = enabled == true
+    self.settings:saveSetting("center_focused_paragraph", self.center_focused_paragraph)
+    if self.enabled and (was_centered or self:usesCenteredParagraphs()) then
+        -- Both the original page position and the centered position can change.
+        self:redraw(true)
+    end
 end
 
 function FocusReader:setPDFHighlightStyle(style)
@@ -1278,6 +1379,7 @@ end
 function FocusReader:setStepMode(mode)
     mode = (mode == "block" or mode == "paragraph") and mode or "line"
     if self.step_mode == mode then return end
+    local was_centered = self:usesCenteredParagraphs()
     local old_slot = self.enabled and self:getSlot() or nil
     local old_native_bounds = self._native_bounds
     -- Word-by-word and paragraph navigation cannot both drive the focus.
@@ -1298,7 +1400,7 @@ function FocusReader:setStepMode(mode)
         if self.style == "color" and not self:usesOverlayHighlight() then
             self:applyNativeSelection()
         end
-        self:redraw(false, old_slot, old_native_bounds)
+        self:redraw(was_centered or self:usesCenteredParagraphs(), old_slot, old_native_bounds)
     end
 end
 
@@ -1324,6 +1426,12 @@ function FocusReader:onScreenResize()
     end
     if self.style == "color" and not self:usesOverlayHighlight() then self:applyNativeSelection() end
     self:redraw(true)
+end
+
+-- KOReader sends this after CRengine has repaginated for a font, margin,
+-- line-spacing or dimension change. Read boxes from the new layout.
+function FocusReader:onDocumentRerendered()
+    if self.enabled and self:usesCenteredParagraphs() then self:onScreenResize() end
 end
 
 function FocusReader:onReaderFooterVisibilityChange()
@@ -1498,6 +1606,13 @@ function FocusReader:addToMainMenu(menu_items)
         { text = _("Focused lines"), sub_item_table = spotlight_line_items },
         advance_menu,
         { text = _("Mask background"), sub_item_table = mask_items },
+        { text = _("Center focused paragraph"),
+          help_text = _("Available in Spotlight Reading Window with Whole paragraph on paged EPUBs."),
+          enabled_func = function() return self:canCenterParagraphs() end,
+          checked_func = function() return self.center_focused_paragraph end,
+          callback = function()
+              self:setCenterFocusedParagraph(not self.center_focused_paragraph)
+          end },
     }
     local freeform_settings = {
         { text = _("Window height"), sub_item_table = freeform_height_items },

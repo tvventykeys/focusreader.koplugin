@@ -151,11 +151,12 @@ check(highlight_settings[5].text=='Word-by-word (no speech)'
     and highlight_settings[6].text=='Advanced'
     and highlight_settings[6].sub_item_table[1].text=='Word navigation diagnostic',
     'word navigation and diagnostics are preserved')
-check(#spotlight_settings==3
+check(#spotlight_settings==4
     and spotlight_settings[1].text=='Focused lines'
     and spotlight_settings[2].text=='Advance by'
-    and spotlight_settings[3].text=='Mask background',
-    'Spotlight settings keep focused lines, advance and mask controls')
+    and spotlight_settings[3].text=='Mask background'
+    and spotlight_settings[4].text=='Center focused paragraph',
+    'Spotlight settings keep existing controls and add the centering toggle')
 check(#spotlight_settings[1].sub_item_table==5
     and #spotlight_settings[3].sub_item_table==6,
     'Spotlight preserves 1–5 line presets, masks, image chooser and backing')
@@ -343,6 +344,7 @@ end
 check(not instance.enabled, 'menu test starts stopped')
 eachLeaf(mode_choices)
 eachLeaf(settings_folders)
+instance:setCenterFocusedParagraph(false)
 if instance.enabled then instance:stop() end
 check(roll.onGotoViewRel == original, 'menu sweep restores page controls')
 
@@ -907,4 +909,222 @@ check(pdf.enabled and #pdf.lines==2,
 pdf:stop()
 check(pdfpaging.onGotoViewRel==pdfturn,
     'existing PDF turning restored after live mode changes')
+
+-- Simulate the ReaderView handing the plugin an already-painted viewport.
+-- Distinct row markers let us verify that native pixels actually move,
+-- including where the source and centered bands overlap.
+local screen = require('device').screen
+local screen_height, screen_width = screen.getHeight, screen.getWidth
+local blitbuffer = require('ffi/blitbuffer')
+local strip_frees = 0
+local function buffer(rows)
+    return {
+        rows = rows or {},
+        getType = function() return 'RGB32' end,
+        blitFrom = function(self, src, x, y, source_x, source_y, width, height)
+            assert(x == source_x, 'native row copy preserves horizontal position in this layout')
+            for j=0,height-1 do self.rows[y+j] = src.rows[source_y+j] end
+        end,
+        paintRect = function(self, x, y, w, h, color)
+            for j=y,y+h-1 do self.rows[j] = color end
+        end,
+        pmulalphablitFrom = function(self, image, x, y, _, _, w, h)
+            self:paintRect(x, y, w, h, 'IMAGE')
+        end,
+        free = function() strip_frees = strip_frees + 1 end,
+    }
+end
+blitbuffer.new = function() return buffer() end
+
+local centered_page = 1
+local layout = {
+    {{28,1}, {375,2}, {410,2}, {445,2}},
+    {{34,2}, {69,2}, {200,3}},
+    {{4,4,2}, {111,4,2}, {218,4,2}, {325,4,2}, {432,4,2},
+     {539,4,2}, {646,4,2}, {753,4,2}, {860,4,2}},
+}
+local reflowed, pages_turned = false, 0
+local centered_doc = setmetatable({}, {__index=doc})
+function centered_doc:getCurrentPage() return centered_page end
+function centered_doc:getTextFromPositions()
+    local boxes = {}
+    for i, row in ipairs(layout[centered_page]) do
+        boxes[i] = {x=50,y=row[1],w=370,h=reflowed and 36 or 24}
+    end
+    return {sboxes=boxes}
+end
+function centered_doc:getWordFromPosition(pos)
+    for _, row in ipairs(layout[centered_page]) do
+        if pos.y >= row[1] and pos.y < row[1] + (reflowed and 36 or 24) then
+            local xp = ('/body/DocFragment[%d]/body/p[%d]/text().%d')
+                :format(row[3] or 1, row[2], row[1])
+            return {pos0=xp, pos1=xp, word='text', sbox={x=50,y=row[1],w=40,h=24}}
+        end
+    end
+end
+function centered_doc:getScreenPositionFromXPointer(xp)
+    if reflowed and xp:find('/p%[2%]') then return 290, 60 end
+end
+
+local centered_view = {dialog={}, view_mode='page', footer_visible=false,
+    registerViewModule=view.registerViewModule}
+local centered_roll = {}
+local centered_ui = {document=centered_doc, rolling=centered_roll, menu=ui.menu}
+local centered = setmetatable({ui=centered_ui, view=centered_view}, {__index=P})
+local function nativeTurn(_, direction)
+    local next_page = math.max(1, math.min(3, centered_page + direction))
+    if next_page ~= centered_page then
+        centered_page, pages_turned = next_page, pages_turned + 1
+        centered:onPageUpdate()
+    end
+    return true
+end
+centered_roll.onGotoViewRel = nativeTurn
+stored.center_focused_paragraph = nil
+centered:init()
+centered:onReaderReady()
+local toggle = menu_items.focusreader.sub_item_table[3].sub_item_table[2].sub_item_table[4]
+check(toggle.enabled_func() and not toggle.checked_func() and not centered.center_focused_paragraph,
+    'centering is available in paged EPUB and defaults off')
+centered:setStyle('mask')
+centered:setSpotlightLayout('window')
+centered:setSpotlightMaskColor('black')
+centered:setStepMode('paragraph')
+centered:start()
+
+local function paintPage()
+    local rows = {}
+    for j=0,screen:getHeight()-1 do rows[j] = 'native row ' .. j end
+    local canvas = buffer(rows)
+    centered:paintTo(canvas, 0, 0)
+    return canvas.rows
+end
+
+local plain_rows = paintPage()
+check(plain_rows[28] == 'native row 28' and plain_rows[450] == 'BLACK',
+    'default window leaves glyphs at the original reading position')
+toggle.callback()
+local short_section = centered:getCenteredSection()
+local short_rows = paintPage()
+check(toggle.checked_func() and stored.center_focused_paragraph == true
+    and centered_page == 1 and pages_turned == 0,
+    'enabling from the menu persists immediately without changing reader position')
+check(short_rows[28] == 'BLACK' and short_rows[short_section.y+2] == 'native row 28'
+    and short_section.y + short_section.h/2 == 450 and strip_frees == 1,
+    'short paragraph pixels move to the midpoint and the temporary buffer is freed')
+
+centered_roll:onGotoViewRel(1)
+local multi_section = centered:getCenteredSection()
+local multi_rows = paintPage()
+check(multi_section.y + multi_section.h/2 == 450 and multi_rows[multi_section.y+2] == 'native row 375'
+    and multi_rows[multi_section.y+72] == 'native row 445',
+    'next paragraph is centered with its original line spacing and pixels intact')
+check(dirty[#dirty].mode == 'ui' and dirty[#dirty].region.y == multi_section.y
+    and dirty[#dirty].region.h == multi_section.h,
+    'replacing the reading band requests one nonflashing regional refresh')
+centered_roll:onGotoViewRel(-1)
+check(centered:getCenteredSection().source_y == short_section.source_y
+    and dirty[#dirty].region.h == multi_section.h and paintPage()[multi_section.y] == 'BLACK',
+    'going backward clears the larger old band and restores the short paragraph')
+
+centered_roll:onGotoViewRel(1)
+centered:setSpotlightMaskColor('white')
+check(paintPage()[0] == 'WHITE' and paintPage()[multi_section.y+2] == 'native row 375',
+    'white mask preserves the native text and its page background')
+centered.spotlight_image_path = '/test/koreader/screensavers/forest.png'
+centered:setSpotlightMaskColor('image')
+check(paintPage()[0] == 'IMAGE' and paintPage()[multi_section.y+2] == 'native row 375',
+    'custom mask preserves a legible centered native text band')
+centered:setSpotlightMaskColor('black')
+centered_roll:onGotoViewRel(1)
+local carry = centered:getCenteredSection()
+check(centered_page == 2 and carry.y+carry.h/2 <= 450
+    and paintPage()[carry.y+2] == 'native row 34'
+    and centered.lines[carry.first].paragraph_key == '/body/DocFragment[1]/body/p[2]',
+    'a paragraph continuation appears centered on the next native page')
+centered_roll:onGotoViewRel(-1)
+check(centered_page == 1 and centered:getCenteredSection().source_y == multi_section.source_y,
+    'backward across a page boundary returns to the preceding paragraph section')
+
+toggle.callback()
+check(not stored.center_focused_paragraph and paintPage()[375] == 'native row 375'
+    and dirty[#dirty].mode == 'ui' and dirty[#dirty].region == nil,
+    'disabling restores the original reading window on the same page')
+toggle.callback()
+centered:setSpotlightLayout('guide')
+check(not centered:getCenteredSection() and paintPage()[375] == 'native row 375',
+    'Reading Guide stays in place while the centered preference is on')
+centered:setSpotlightLayout('window')
+centered:setStepMode('line')
+check(not centered:getCenteredSection() and dirty[#dirty].region == nil,
+    'switching to line focus clears the centered presentation')
+centered:setStepMode('paragraph')
+centered:setStyle('color')
+check(not centered:getCenteredSection(), 'Highlight Focus ignores the centered preference')
+centered:setWordMode(true)
+check(not centered:getCenteredSection(), 'word focus ignores the centered preference')
+centered:setWordMode(false)
+centered:setStyle('freeform')
+check(not centered:getCenteredSection(), 'Freeform Focus ignores the centered preference')
+centered:setStyle('mask')
+centered:setStepMode('paragraph')
+centered_view.view_mode = 'scroll'
+check(not toggle.enabled_func() and not centered:getCenteredSection(),
+    'scroll mode gracefully uses standard Spotlight')
+centered_view.view_mode = 'page'
+
+centered_roll:onGotoViewRel(1)
+centered_roll:onGotoViewRel(1)
+centered_roll:onGotoViewRel(1)
+centered_roll:onGotoViewRel(1)
+local tall_first = centered:getCenteredSection()
+check(centered_page == 3 and tall_first.first == 1 and tall_first.last == 8
+    and centered.lines[1].paragraph_key == '/body/DocFragment[2]/body/p[4]',
+    'a chapter transition starts the first section of a viewport-sized paragraph')
+centered_roll:onGotoViewRel(1)
+local tall_last = centered:getCenteredSection()
+check(centered_page == 3 and tall_last.first == 9 and tall_last.last == 9
+    and paintPage()[tall_last.y+2] == 'native row 860',
+    'oversized paragraph shows its final native line before the next page')
+centered_roll:onGotoViewRel(-1)
+check(centered:getCenteredSection().last == 8, 'backward reads the preceding tall section')
+centered_roll:onGotoViewRel(-1)
+check(centered_page == 2 and centered:getCenteredSection().first == 3,
+    'backward across chapters shows the previous last paragraph')
+centered_roll:onGotoViewRel(1)
+centered_roll:onGotoViewRel(1)
+centered_roll:onGotoViewRel(1)
+check(centered_page == 3 and centered:getCenteredSection().first == 9,
+    'advancing at the end of the book keeps its last centered text')
+centered:stop()
+check(centered_page == 3 and centered_roll.onGotoViewRel == nativeTurn
+    and paintPage()[860] == 'native row 860',
+    'exiting restores the native page layout and controls at the latest progress')
+
+centered_page = 1
+centered:start()
+centered_roll:onGotoViewRel(1)
+screen.getHeight = function() return 500 end
+screen.getWidth = function() return 800 end
+centered_view.footer_visible = true
+centered_view.footer = {getHeight=function() return 40 end}
+layout[1] = {{24,1}, {72,1}, {270,2}, {312,2}}
+reflowed = true
+centered:onDocumentRerendered()
+local resized = centered:getCenteredSection()
+check(centered_page == 1 and resized.w == 800 and resized.y+resized.h/2 == 230
+    and resized.first == 3 and resized.last == 4
+    and paintPage()[resized.y+2] == 'native row 270',
+    'rotation and larger fonts remeasure the same paragraph above the footer')
+centered:stop()
+check(centered_page == 1 and paintPage()[270] == 'native row 270',
+    'stopping on the starting page restores the original native position')
+local reopened = setmetatable({ui=centered_ui, view=centered_view}, {__index=P})
+reopened:init()
+check(reopened.center_focused_paragraph and not reopened.enabled,
+    'preference reloads without auto-starting a reading session')
+pdf.center_focused_paragraph = true
+check(not pdf:canCenterParagraphs() and not pdf:usesCenteredParagraphs(),
+    'PDF keeps existing focus behavior even with the EPUB preference saved')
+screen.getHeight, screen.getWidth = screen_height, screen_width
 print('PASS: '..checks..' mocked KOReader checks')
