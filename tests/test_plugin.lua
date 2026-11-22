@@ -60,6 +60,7 @@ package.preload['dispatcher']=function() return {
 } end
 local dirty = {}
 local next_ticks = {}
+local scheduled, top_widget, spin_widget = {}, nil, nil
 local function flushNextTicks()
     while #next_ticks > 0 do
         local cb = table.remove(next_ticks, 1)
@@ -68,9 +69,20 @@ local function flushNextTicks()
 end
 package.preload['ui/uimanager']=function() return {
    setDirty=function(_,widget, mode, region) dirty[#dirty+1]={widget=widget,mode=mode,region=region} end,
-   show=function(_,msg) error('unexpected InfoMessage') end,
+   show=function(_,msg)
+       if msg.is_spin then spin_widget = msg else error('unexpected InfoMessage') end
+   end,
    nextTick=function(_,cb) next_ticks[#next_ticks+1] = cb end,
+   scheduleIn=function(_,seconds,cb)
+       assert(not scheduled[cb], 'timer scheduled twice')
+       scheduled[cb] = seconds
+   end,
+   unschedule=function(_,cb) scheduled[cb] = nil end,
+   getTopmostVisibleWidget=function() return top_widget end,
 } end
+package.preload['ui/widget/spinwidget']=function()
+    return {new=function(_,options) options.is_spin=true; return options end}
+end
 package.preload['ui/widget/widget']=function()
    local Widget={}
    function Widget:extend(fields) return setmetatable(fields,{__index=self}) end
@@ -136,7 +148,7 @@ check(settings_folders[1].text=='Highlight Focus'
 local highlight_settings=settings_folders[1].sub_item_table
 local spotlight_settings=settings_folders[2].sub_item_table
 local freeform_settings=settings_folders[3].sub_item_table
-check(#highlight_settings==6 and highlight_settings[1].text=='Color'
+check(#highlight_settings==7 and highlight_settings[1].text=='Color'
     and highlight_settings[2].text=='Focused lines'
     and highlight_settings[3].text=='Advance by',
     'Highlight settings include color, focused lines and nested text navigation')
@@ -332,7 +344,8 @@ local function eachLeaf(list)
     for _,entry in ipairs(list) do
         if entry.sub_item_table then
             eachLeaf(entry.sub_item_table)
-        elseif entry.callback and entry.text ~= 'Word navigation diagnostic' then
+        elseif entry.callback and entry.text ~= 'Word navigation diagnostic'
+                and (not entry.enabled_func or entry.enabled_func()) then
             if entry.checked_func then
                 check(not entry.check_callback_closes_menu,
                     'checked setting uses native menu refresh')
@@ -1127,4 +1140,116 @@ pdf.center_focused_paragraph = true
 check(not pdf:canCenterParagraphs() and not pdf:usesCenteredParagraphs(),
     'PDF keeps existing focus behavior even with the EPUB preference saved')
 screen.getHeight, screen.getWidth = screen_height, screen_width
+
+-- Automatic Highlight reuses reader navigation and owns a single timer.
+local auto_page = 1
+local auto_turns = 0
+local auto_doc = setmetatable({
+    getCurrentPage=function() return auto_page end,
+}, {__index=doc})
+local auto_original = function(_, direction)
+    auto_turns = auto_turns + 1
+    auto_page = math.max(1, math.min(3, auto_page + direction))
+    return true
+end
+local auto_roll = {onGotoViewRel=auto_original}
+local auto_ui = {document=auto_doc, rolling=auto_roll, highlight=ui.highlight, menu=ui.menu}
+local auto = setmetatable({ui=auto_ui,view=view}, {__index=P})
+auto:init()
+auto:onReaderReady()
+auto:setStyle('color')
+auto:setWordMode(false)
+auto:setStepMode('line')
+auto:setLines(1)
+top_widget = auto_ui
+local auto_menu = menu_items.focusreader.sub_item_table[3].sub_item_table[1].sub_item_table[7]
+local play, speed = auto_menu.sub_item_table[1], auto_menu.sub_item_table[2]
+local auto_action = registered_actions.focusreader_auto_highlight
+check(auto_action and auto_action.reader and auto_action.event=='FocusReaderToggleAutoHighlight',
+    'automatic highlight exposes a reader gesture action')
+check(auto_menu.text=='Automatic highlight' and not play.enabled_func()
+    and auto.auto_highlight_seconds==5 and not next(scheduled),
+    'playback is off by default and can be configured before Focus Reader starts')
+speed.callback()
+check(spin_widget.value==5 and spin_widget.value_min==0.5
+    and spin_widget.value_max==120 and spin_widget.value_step==0.5,
+    'the speed picker offers half-second intervals from 0.5 to 120 seconds')
+spin_widget.value = 2.5
+spin_widget.callback(spin_widget)
+check(stored.auto_highlight_seconds==2.5 and not next(scheduled),
+    'changing speed persists without starting automatic playback')
+auto:start()
+check(play.enabled_func() and not next(scheduled), 'starting Highlight Focus alone remains manual')
+play.callback()
+check(not next(scheduled), 'menu playback waits for TouchMenu to dismiss')
+flushNextTicks()
+local task = auto.auto_highlight_task
+check(play.text_func()=='Pause automatic highlight' and scheduled[task]==2.5 and auto.index==1,
+    'play waits one full interval before advancing')
+
+local function tick()
+    assert(scheduled[task], 'expected a scheduled highlight tick')
+    scheduled[task] = nil
+    task()
+end
+tick()
+check(auto.index==2 and scheduled[task]==2.5 and dirty[#dirty].mode=='ui',
+    'a timer tick advances exactly one line through the normal redraw path')
+top_widget = {}
+tick()
+check(auto.index==2 and scheduled[task]==2.5, 'a visible menu prevents reading progress')
+top_widget = auto_ui
+tick()
+check(auto.index==3, 'returning to the book advances one step without catching up')
+auto_roll:onGotoViewRel(-1)
+check(auto.index==2 and scheduled[task]==2.5, 'a manual turn resets the active interval')
+auto:setAutoHighlightSeconds(8)
+check(scheduled[task]==8 and stored.auto_highlight_seconds==8,
+    'changing speed during playback replaces the pending timer')
+
+auto.index = #auto.lines
+tick()
+check(auto_page==2 and auto.index==1 and scheduled[task]==8,
+    'automatic advance uses the original forward page turn at the last line')
+auto:setStepMode('paragraph')
+auto_doc.getWordFromPosition = function(_, pos)
+    local paragraph = pos.y < 345 and 1 or 2
+    return {pos0=('/body/DocFragment[1]/body/p[%d]/text().5'):format(paragraph)}
+end
+auto:onPageUpdate()
+tick()
+check(auto_page==2 and auto.index==7, 'whole paragraph playback uses the existing paragraph anchors')
+auto_page = 3
+auto:onPageUpdate()
+auto.index = 7
+local before_end = auto_turns
+tick()
+check(auto_turns==before_end+1 and not next(scheduled) and auto.enabled
+    and play.text_func()=='Play automatic highlight', 'book end stops automatic turns and keeps the focus session')
+task()
+check(auto_turns==before_end+1, 'an already-paused timer cannot make another page turn')
+
+auto:onFocusReaderToggleAutoHighlight()
+auto:onFocusReaderToggleAutoHighlight()
+check(not next(scheduled) and auto.enabled, 'the gesture pauses without stopping Highlight Focus')
+auto:onFocusReaderToggleAutoHighlight()
+auto:onSuspend()
+check(not next(scheduled) and auto.enabled, 'suspending cancels the timer and keeps the reading position')
+auto:onFocusReaderToggleAutoHighlight()
+auto:setStyle('mask')
+check(not next(scheduled) and not play.enabled_func(), 'leaving Highlight Focus pauses playback')
+auto:setStyle('color')
+check(not next(scheduled), 'returning to Highlight Focus requires explicit play')
+auto:onFocusReaderToggleAutoHighlight()
+auto:stop()
+check(not next(scheduled) and auto_roll.onGotoViewRel==auto_original,
+    'stopping Focus Reader cancels the timer and restores page controls')
+auto:start()
+auto:onFocusReaderToggleAutoHighlight()
+auto:onCloseDocument()
+check(not next(scheduled) and not auto.enabled, 'closing the book cancels playback')
+local next_book = setmetatable({ui=auto_ui,view=view}, {__index=P})
+next_book:init()
+check(next_book.auto_highlight_seconds==8 and not next_book.auto_highlight_playing,
+    'reopening restores the speed but starts paused')
 print('PASS: '..checks..' mocked KOReader checks')

@@ -39,6 +39,12 @@ With a book open, visit **Tools → Focus Reader** to select your reading mode, 
 
 **Want a one-gesture on/off switch?** In KOReader, open **Settings → Taps and gestures → Gesture manager**, choose a gesture, and assign **Reader → Toggle Focus Reader**. The same action can be used with KOReader Profiles, Quick Menus, and compatible ZenOS shortcuts. Choosing Start/Stop from the Focus Reader menu also returns you directly to your book.
 
+### Automatic highlight
+
+Start Focus Reader in **Highlight Focus** mode. Open **Tools → Focus Reader → Settings → Highlight Focus → Automatic highlight** to set **Seconds per step** and choose **Play automatic highlight**. The default is 5 seconds, adjustable from 0.5 to 120 seconds. Each step follows your existing line, group, paragraph, or word setting and turns the page when needed.
+
+Use **Pause automatic highlight** in the same menu or assign **Reader → Play or pause automatic highlight** to a gesture. Manual advances give the newly highlighted text a full interval. Playback waits while a menu or dialog covers the book and pauses when the device sleeps. Your speed is saved, and playback starts only when you choose Play.
+
 ### Centered paragraph reading
 
 Choose **Focus mode → Spotlight Focus: Reading Window**. Under **Settings → Spotlight Focus**, set **Advance by → Whole paragraph** and turn on **Center focused paragraph**. The toggle defaults to off.
