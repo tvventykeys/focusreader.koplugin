@@ -39,6 +39,14 @@ With a book open, visit **Tools → Focus Reader** to select your reading mode, 
 
 **Want a one-gesture on/off switch?** In KOReader, open **Settings → Taps and gestures → Gesture manager**, choose a gesture, and assign **Reader → Toggle Focus Reader**. The same action can be used with KOReader Profiles, Quick Menus, and compatible ZenOS shortcuts. Choosing Start/Stop from the Focus Reader menu also returns you directly to your book.
 
+### Centered paragraph reading
+
+Choose **Focus mode → Spotlight Focus: Reading Window**. Under **Settings → Spotlight Focus**, set **Advance by → Whole paragraph** and turn on **Center focused paragraph**. The toggle defaults to off.
+
+On paged EPUBs, Focus Reader moves the rendered paragraph to the vertical middle of the reading area, retaining the book’s alignment and typography. Paragraphs that cross a page boundary appear as successive centered sections. Sections that are too tall for the reading area split at line boundaries. Forward and back follow the book’s reading order. Stopping restores the normal layout on the page you reached.
+
+PDFs and continuous-scroll EPUBs use the standard in-place focus. If the reader already cuts off part of a source line, that section also uses the standard window.
+
 ### Custom image backgrounds
 
 Make Spotlight Focus your own with a picture instead of a plain black or white mask. On Kobo, copy your chosen image into `.adds/koreader/screensavers/`, then open **Tools → Focus Reader → Spotlight Focus → Mask color** and select your custom image. For transparent PNGs, choose a **black or white background** behind the artwork. You can also use your **current book cover** when available.

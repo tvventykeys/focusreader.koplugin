@@ -1,5 +1,12 @@
 ﻿# Changelog
 
+## v1.2.3-beta.4 - Centered Paragraph Focus (2026-11-22)
+
+- Add an optional **Center focused paragraph** setting for paged EPUBs in Spotlight Reading Window with **Advance by > Whole paragraph**.
+- Move KOReader's rendered text to the vertical midpoint while preserving book typography and alignment.
+- Show long paragraphs and page continuations as successive centered sections. Stopping restores the normal layout at the current page.
+- The setting defaults to off. Kobo ghosting and refresh behavior still need device testing.
+
 ## v1.2.3-beta.3 - Freeform window overlap (2026-11-16)
 
 - Add adjustable Freeform Focus window overlap (0%, 10%, 20%, 25%, 30%, 40%, 50%) without OCR.

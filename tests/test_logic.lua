@@ -81,6 +81,29 @@ local columns=L.paragraphStarts(long_lines,keys)
 ok(columns[2]==8 and L.slotRange(long_lines,1,9).area==area,
     'separate reading areas never merge into one focus window')
 
+local one_line = L.centeredParagraphSections(long_lines, 1, 1, area)[1]
+local multi_line = L.centeredParagraphSections(long_lines, 2, 7, area)[1]
+ok(one_line.x == area.x and one_line.w == area.w and one_line.source_y == 38
+    and math.abs(one_line.y + one_line.h / 2 - area.h / 2) <= 0.5,
+    'one line is translated vertically from its native source rows')
+ok(multi_line.first == 2 and multi_line.last == 7 and multi_line.h == 229
+    and math.abs(multi_line.y + multi_line.h / 2 - area.h / 2) <= 0.5,
+    'multiple lines keep their full native spacing around the midpoint')
+local tall = {x=0,y=0,w=500,h=100}
+local tall_lines = {
+    {y=0,h=26,area=tall}, {y=35,h=26,area=tall}, {y=72,h=28,area=tall},
+}
+local sections = L.centeredParagraphSections(tall_lines, 1, 3, tall)
+ok(#sections == 2 and sections[1].first == 1 and sections[1].last == 2
+    and sections[2].first == 3 and sections[2].last == 3,
+    'an oversized block splits only between complete lines, in order')
+ok(sections[1].source_y == 0 and sections[2].source_y + sections[2].h == tall.h
+    and sections[1].y >= 5 and sections[2].y >= 5,
+    'the first and last native rows survive and leave a reading margin')
+tall_lines[3].h = 29
+ok(#L.centeredParagraphSections(tall_lines, 1, 3, tall) == 0,
+    'a source line cut off by the viewport is not silently cropped again')
+
 -- Freeform Focus uses only page viewport geometry, never text positions.
 local viewport={x=0,y=0,w=600,h=900}
 ok(L.freeformWindowHeight(viewport,30)==270,

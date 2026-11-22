@@ -194,6 +194,58 @@ function Logic.slotRange(lines, first_index, last_index, top_padding)
         h=math.max(0,bottom-top), area=first.area}
 end
 
+-- Split a visible paragraph at line boundaries when it cannot fit with
+-- breathing room. Keep native spacing inside each section and use the same
+-- viewport midpoint for each section, regardless of its source position.
+function Logic.centeredParagraphSections(lines, first, last, viewport)
+    local sections = {}
+    if not first or viewport.h <= 0 then return sections end
+    local area = lines[first].area
+    local limit = viewport.h - 2 * math.floor(viewport.h * 0.05)
+    local section_start, top, bottom
+    local function appendSection(section_end)
+        local height = bottom - top
+        if height > viewport.h then return false end
+        sections[#sections + 1] = {
+            first = section_start, last = section_end,
+            x = area.x, source_y = top, w = area.w, h = height,
+            y = viewport.y + math.floor((viewport.h - height) / 2),
+            centered = true,
+        }
+        return true
+    end
+    local area_bottom = area.y + area.h
+    for index = first, last do
+        local line = lines[index]
+        -- A line already clipped by the reader cannot be reconstructed here.
+        if line.area ~= area or line.y < area.y or line.y + line.h > area_bottom then
+            return {}
+        end
+        local previous, following = lines[index - 1], lines[index + 1]
+        local above = previous and previous.area == area
+            and math.ceil(previous.y + previous.h) or area.y
+        local below = following and following.area == area
+            and math.floor(following.y) or area_bottom
+        local line_top = math.floor(line.y)
+        local line_bottom = math.ceil(line.y + line.h)
+        -- Include a little of the native line box surround where available,
+        -- without picking up glyphs from adjacent lines.
+        local padded_top = math.min(line_top, math.max(line_top - 2, above))
+        local padded_bottom = math.max(line_bottom, math.min(line_bottom + 2, below))
+        if top and padded_bottom - top > limit and above <= line_top then
+            if not appendSection(index - 1) then return {} end
+            top = nil
+        end
+        if not top then
+            section_start, top, bottom = index, padded_top, padded_bottom
+        else
+            bottom = math.max(bottom, padded_bottom)
+        end
+    end
+    if not appendSection(last) then return {} end
+    return sections
+end
+
 function Logic.maxStart(lines, count)
     return math.max(1, #lines - clamp(count, 1, 5) + 1)
 end
