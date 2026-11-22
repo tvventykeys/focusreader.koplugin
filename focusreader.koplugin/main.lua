@@ -15,6 +15,12 @@ local _ = require("gettext")
 local plugin_dir = debug.getinfo(1, "S").source:match("^@(.*/)") or "./"
 local Logic = dofile(plugin_dir .. "logic.lua")
 local Screen = Device.screen
+local AUTO_HIGHLIGHT_MIN, AUTO_HIGHLIGHT_MAX, AUTO_HIGHLIGHT_DEFAULT = 0.5, 120, 5
+
+local function autoHighlightSeconds(value)
+    if type(value) ~= "number" or value ~= value then return AUTO_HIGHLIGHT_DEFAULT end
+    return math.max(AUTO_HIGHLIGHT_MIN, math.min(AUTO_HIGHLIGHT_MAX, value))
+end
 
 local FocusReader = Widget:extend{
     name = "focusreader",
@@ -74,6 +80,10 @@ function FocusReader:init()
     local saved_step = self.settings:readSetting("step_mode")
     self.step_mode = (saved_step == "paragraph" or saved_step == "block") and saved_step or "line"
     self.center_focused_paragraph = self.settings:readSetting("center_focused_paragraph") == true
+    self.auto_highlight_seconds = autoHighlightSeconds(
+        self.settings:readSetting("auto_highlight_seconds"))
+    self.auto_highlight_playing = false
+    self.auto_highlight_task = function() self:advanceAutoHighlight() end
     self.word_mode = self.settings:readSetting("word_mode") == true
     self.pdf_highlight_style = self.settings:readSetting("pdf_highlight_style") == "underline"
         and "underline" or "tint"
@@ -92,13 +102,18 @@ function FocusReader:init()
     self:onDispatcherRegisterActions()
 end
 
--- One reader-only action for KOReader gestures, Profiles, Quick Menus and
--- compatible shortcut bars. It reuses Start/Stop cleanup and never autostarts.
+-- Reader-only actions for KOReader gestures, Profiles and Quick Menus.
 function FocusReader:onDispatcherRegisterActions()
     Dispatcher:registerAction("focusreader_toggle", {
         category = "none",
         event = "FocusReaderToggle",
         title = _("Toggle Focus Reader"),
+        reader = true,
+    })
+    Dispatcher:registerAction("focusreader_auto_highlight", {
+        category = "none",
+        event = "FocusReaderToggleAutoHighlight",
+        title = _("Play or pause automatic highlight"),
         reader = true,
     })
 end
@@ -110,6 +125,64 @@ function FocusReader:onFocusReaderToggle()
         self:start()
     end
     return true
+end
+
+function FocusReader:canPlayAutoHighlight()
+    return self.enabled and self.supported and self.style == "color"
+        and self.ui.document ~= nil
+end
+
+function FocusReader:scheduleAutoHighlight()
+    if not self.auto_highlight_playing then return end
+    UIManager:unschedule(self.auto_highlight_task)
+    UIManager:scheduleIn(self.auto_highlight_seconds, self.auto_highlight_task)
+end
+
+function FocusReader:pauseAutoHighlight()
+    if not self.auto_highlight_playing then return end
+    self.auto_highlight_playing = false
+    UIManager:unschedule(self.auto_highlight_task)
+end
+
+function FocusReader:onFocusReaderToggleAutoHighlight()
+    if self.auto_highlight_playing then
+        self:pauseAutoHighlight()
+    elseif self:canPlayAutoHighlight() then
+        self.auto_highlight_playing = true
+        self:scheduleAutoHighlight()
+    else
+        return
+    end
+    return true
+end
+
+function FocusReader:advanceAutoHighlight()
+    if not self.auto_highlight_playing then return end
+    if not self:canPlayAutoHighlight() then
+        self:pauseAutoHighlight()
+        return
+    end
+    -- Leave the book alone while a menu, dialog or screensaver covers it.
+    -- Skipped ticks never accumulate into a burst of page turns.
+    if UIManager:getTopmostVisibleWidget() == self.ui then
+        local location, index = self:getLocation(), self.index
+        self:moveFocus(1)
+        if self:getLocation() == location and self.index == index then
+            self:pauseAutoHighlight()
+            return
+        end
+    end
+    self:scheduleAutoHighlight()
+end
+
+function FocusReader:onSuspend()
+    self:pauseAutoHighlight()
+end
+
+function FocusReader:setAutoHighlightSeconds(seconds)
+    self.auto_highlight_seconds = autoHighlightSeconds(seconds)
+    self.settings:saveSetting("auto_highlight_seconds", self.auto_highlight_seconds)
+    self:scheduleAutoHighlight()
 end
 
 function FocusReader:supportDiagnostics()
@@ -1018,7 +1091,10 @@ function FocusReader:installTurnHook()
                 or math.abs(difference) ~= 1 then
             return plugin._original_turn(controller, difference, ...)
         end
-        return plugin:moveFocus(difference)
+        local result = plugin:moveFocus(difference)
+        -- Give a newly selected unit a full interval after a manual turn.
+        plugin:scheduleAutoHighlight()
+        return result
     end
     rolling.onGotoViewRel = self._turn_wrapper
 end
@@ -1140,6 +1216,7 @@ end
 function FocusReader:stop(skip_redraw)
     local was_enabled = self.enabled
     self.enabled = false
+    self:pauseAutoHighlight()
     self._page_direction = nil
     self:restoreTurnHook()
     if was_enabled and self.style == "color" then
@@ -1281,6 +1358,7 @@ function FocusReader:setStyle(style)
         return
     end
     if self.enabled and self.style == "color" then
+        self:pauseAutoHighlight()
         self:clearNativeSelection()
         self:restoreNativeSelectionColor()
     end
@@ -1413,7 +1491,10 @@ function FocusReader:onPageUpdate()
         return
     end
     if self.style == "color" and not self:usesOverlayHighlight() then self:applyNativeSelection() end
-    if changed then self:redraw(false) end
+    if changed then
+        if not self._page_direction then self:scheduleAutoHighlight() end
+        self:redraw(false)
+    end
 end
 FocusReader.onPosUpdate = FocusReader.onPageUpdate
 
@@ -1590,6 +1671,32 @@ function FocusReader:addToMainMenu(menu_items)
               callback = function(menu)
                   self:closeSettingsMenu(menu)
                   self:showWordDiagnostics()
+              end },
+        } },
+        { text = _("Automatic highlight"), sub_item_table = {
+            { text_func = function()
+                  return self.auto_highlight_playing and _("Pause automatic highlight")
+                      or _("Play automatic highlight")
+              end,
+              enabled_func = function() return self:canPlayAutoHighlight() end,
+              callback = function()
+                  UIManager:nextTick(function() self:onFocusReaderToggleAutoHighlight() end)
+              end },
+            { text = _("Seconds per step"),
+              keep_menu_open = true,
+              callback = function()
+                  local SpinWidget = require("ui/widget/spinwidget")
+                  UIManager:show(SpinWidget:new{
+                      title_text = _("Seconds per highlight step"),
+                      value = self.auto_highlight_seconds,
+                      value_min = AUTO_HIGHLIGHT_MIN,
+                      value_max = AUTO_HIGHLIGHT_MAX,
+                      value_step = 0.5,
+                      value_hold_step = 5,
+                      default_value = AUTO_HIGHLIGHT_DEFAULT,
+                      precision = "%.1f",
+                      callback = function(spinner) self:setAutoHighlightSeconds(spinner.value) end,
+                  })
               end },
         } },
     }
