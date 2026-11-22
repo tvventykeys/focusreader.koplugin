@@ -1,5 +1,12 @@
 ﻿# Changelog
 
+## v1.2.3-beta.5 - Automatic Highlight (2026-11-22)
+
+- Add hands-free playback in Highlight Focus with a saved delay of 0.5 to 120 seconds per step.
+- Advance by the selected line, group, paragraph, or word setting and turn pages automatically.
+- Play or pause from the Highlight Focus settings or a KOReader gesture. Playback waits while menus or dialogs cover the book and pauses when the device sleeps.
+- Desktop KOReader and automated checks passed. Physical e-ink refresh and ghosting still need testing.
+
 ## v1.2.3-beta.4 - Centered Paragraph Focus (2026-11-22)
 
 - Add an optional **Center focused paragraph** setting for paged EPUBs in Spotlight Reading Window with **Advance by > Whole paragraph**.
